@@ -335,7 +335,7 @@ class TickStore(object):
             raise NoDataFoundException("No Data found for {} in range: {}".format(symbol, date_range))
         rtn = self._pad_and_fix_dtypes(rtn, column_dtypes)
 
-        index = pd.to_datetime(np.concatenate(rtn[INDEX]), utc=True, unit='ms')
+        index = (np.concatenate(rtn[INDEX]).astype('datetime64[ms]'))
         if columns is None:
             columns = [x for x in rtn.keys() if x not in (INDEX, 'SYMBOL')]
         if multiple_symbols and 'SYMBOL' not in columns:
@@ -356,7 +356,7 @@ class TickStore(object):
         mgr = _arrays_to_mgr(arrays, columns, index, columns, dtype=None)
         rtn = pd.DataFrame(mgr)
         # Present data in the user's default TimeZone
-        rtn.index = rtn.index.tz_convert(mktz())
+        rtn.index = rtn.index.tz_localize(mktz())
 
         t = (dt.now() - perf_start).total_seconds()
         ticks = len(rtn)
