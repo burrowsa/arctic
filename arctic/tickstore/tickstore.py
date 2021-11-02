@@ -353,7 +353,7 @@ class TickStore(object):
 
         t = (dt.now() - perf_start).total_seconds()
         logger.info("Got data in %s secs, creating DataFrame..." % t)
-        mgr = _arrays_to_mgr(arrays, columns, index, columns, dtype=None)
+        mgr = _arrays_to_mgr(arrays, columns, index, columns, dtype=None, typ='array')
         rtn = pd.DataFrame(mgr)
         # Present data in the user's default TimeZone
         rtn.index = rtn.index.tz_localize(mktz())
