@@ -336,7 +336,7 @@ class TickStore(object):
         rtn = self._pad_and_fix_dtypes(rtn, column_dtypes)
 
         index = (np.concatenate(rtn[INDEX])).astype("datetime64[ms]")
-	if columns is None:
+        if columns is None:
             columns = [x for x in rtn.keys() if x not in (INDEX, 'SYMBOL')]
         if multiple_symbols and 'SYMBOL' not in columns:
             columns = ['SYMBOL', ] + columns
