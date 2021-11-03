@@ -356,7 +356,7 @@ class TickStore(object):
         mgr = _arrays_to_mgr(arrays, columns, index, columns, dtype=None)
         rtn = pd.DataFrame(mgr)
         # Present data in the user's default TimeZone
-	rtn.index = rtn.index.tz_localize(dt.now().astimezone().tzinfo)
+        rtn.index = rtn.index.tz_localize(dt.now().astimezone().tzinfo)
         t = (dt.now() - perf_start).total_seconds()
         ticks = len(rtn)
         rate = int(ticks / t) if t != 0 else float("nan")
