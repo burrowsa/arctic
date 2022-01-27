@@ -112,7 +112,7 @@ def print_results(n_threads, chunk_size, n_chunks, total_mb, measurements, compa
 
 
 def main():
-    use_HC = False
+    use_HC = True
     for df_length in (1000, 3000, 10000, 30000):
         for n_chunks in (1, 2, 4, 8, 16, 32, 64, 128):
             print("\n\n----------- High compression: {}, Chunks: {}, DataFrame size: {} ------------".format(use_HC, n_chunks, df_length))

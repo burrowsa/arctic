@@ -13,7 +13,6 @@ from ._config import ENABLE_PARALLEL, LZ4_HIGH_COMPRESSION, LZ4_WORKERS, LZ4_N_P
 
 logger = logging.getLogger(__name__)
 
-
 _compress_thread_pool = None
 
 

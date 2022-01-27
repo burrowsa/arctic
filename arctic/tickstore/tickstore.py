@@ -11,6 +11,7 @@ from bson.binary import Binary
 from pymongo import ReadPreference
 from pymongo.errors import OperationFailure
 from six import iteritems, string_types
+import sys
 
 try:
     from pandas.core.frame import _arrays_to_mgr
@@ -23,7 +24,8 @@ try:
 except ImportError:
     from pandas.lib import infer_dtype
 
-from ..date import DateRange, to_pandas_closed_closed, mktz, datetime_to_ms, ms_to_datetime, CLOSED_CLOSED, to_dt, utc_dt_to_local_dt
+from ..date import DateRange, to_pandas_closed_closed, mktz, datetime_to_ms, ms_to_datetime, \
+    datetime_to_us, us_to_datetime, CLOSED_CLOSED, to_dt, utc_dt_to_local_dt, datetime_to_ns, ns_to_datetime
 from ..decorators import mongo_retry
 from ..exceptions import OverlappingDataException, NoDataFoundException, UnorderedDataException, UnhandledDtypeException, ArcticException
 from .._util import indent
@@ -190,7 +192,7 @@ class TickStore(object):
         start_range = {}
         first_dt = last_dt = None
         if date_range.start:
-            assert date_range.start.tzinfo
+            # assert date_range.start.tzinfo  TODO: do we need timezones?
             start = date_range.start
 
             # If all chunks start inside of the range, we default to capping to our
@@ -217,8 +219,8 @@ class TickStore(object):
             try:
                 for candidate in result:
                     chunk = self._collection.find_one({'s': candidate['start'], 'sy': candidate['_id']}, {'e': 1})
-                    if chunk['e'].replace(tzinfo=mktz('UTC')) >= start:
-                        start_range['$gte'] = candidate['start'].replace(tzinfo=mktz('UTC'))
+                    if chunk['e'] >= start:  # chunk['e'].replace(tzinfo=mktz('UTC')) >= start:
+                        start_range['$gte'] = candidate['start']  # .replace(tzinfo=mktz('UTC'))
                         break
             except StopIteration:
                 pass
@@ -226,7 +228,7 @@ class TickStore(object):
         # Find the end bound
         if date_range.end:
             # If we have an end, we are only interested in the chunks that start before the end.
-            assert date_range.end.tzinfo
+            # assert date_range.end.tzinfo  TODO: do we need timezones?
             last_dt = date_range.end
         else:
             logger.info("No end provided.  Loading a month for: {}:{}".format(symbol, first_dt))
@@ -263,7 +265,7 @@ class TickStore(object):
         return ReadPreference.NEAREST if allow_secondary else ReadPreference.PRIMARY
 
     def read(self, symbol, date_range=None, columns=None, include_images=False, allow_secondary=None,
-             _target_tick_count=0):
+             convert_index=False, time_unit='ns'):
         """
         Read data for the named symbol.  Returns a VersionedItem object with
         a data and metdata element (as passed into write).
@@ -273,7 +275,9 @@ class TickStore(object):
         symbol : `str`
             symbol name for the item
         date_range : `date.DateRange`
-            Returns ticks in the specified DateRange
+            Returns ticks in the specified DateRange. This is inclusive of the end-point, but with a caveat: if you
+            put the endpoint as e.g. "2021-01-01", this will be converted into a Timestamp "2021-01-01 00:00", and so
+            will only download data up to (and including) midnight on the MORNING of "2021-01-01".
         columns : `list` of `str`
             Columns (fields) to return from the tickstore
         include_images : `bool`
@@ -283,6 +287,11 @@ class TickStore(object):
             `None` : use the settings from the top-level `Arctic` object used to query this version store.
             `True` : allow reads from secondary members
             `False` : only allow reads from primary members
+        convert_index : `bool`
+            should the timestamps be converted into datetime64[ns] timestamps or left as float64s. Helpful for
+            human-readability, but conversion is slow.
+        time_unit : `str`
+            one of 'ms', 'us', 'ns' - for telling numpy how to convert timestamps
 
         Returns
         -------
@@ -299,25 +308,18 @@ class TickStore(object):
         query.update(self._mongo_date_range_query(symbol, date_range))
 
         if columns:
-            projection = dict([(SYMBOL, 1),
-                               (INDEX, 1),
-                               (START, 1),
-                               (VERSION, 1),
-                               (IMAGE_DOC, 1)] +
-                              [(COLUMNS + '.%s' % c, 1) for c in columns])
+            projection = {SYMBOL: 1, INDEX: 1, START: 1, VERSION: 1, IMAGE_DOC: 1,
+                          **{COLUMNS + f'.{c}': 1 for c in columns}}
             column_set.update([c for c in columns if c != 'SYMBOL'])
         else:
-            projection = dict([(SYMBOL, 1),
-                               (INDEX, 1),
-                               (START, 1),
-                               (VERSION, 1),
-                               (COLUMNS, 1),
-                               (IMAGE_DOC, 1)])
+            projection = {SYMBOL: 1, INDEX: 1, START: 1, VERSION: 1, COLUMNS: 1, IMAGE_DOC: 1}
 
         column_dtypes = {}
-        ticks_read = 0
         data_coll = self._collection.with_options(read_preference=self._read_preference(allow_secondary))
-        for b in data_coll.find(query, projection=projection).sort([(START, pymongo.ASCENDING)],):
+
+        # total_size = 0
+        for b in data_coll.find(query, projection=projection).sort([(START, pymongo.ASCENDING)], ):
+            # total_size += sum(sys.getsizeof(v)+sys.getsizeof(k) for k, v in b.items())
             data = self._read_bucket(b, column_set, column_dtypes,
                                      multiple_symbols or (columns is not None and 'SYMBOL' in columns),
                                      include_images, columns)
@@ -326,16 +328,17 @@ class TickStore(object):
                     rtn[k].append(v)
                 except KeyError:
                     rtn[k] = [v]
-            # For testing
-            ticks_read += len(data[INDEX])
-            if _target_tick_count and ticks_read > _target_tick_count:
-                break
+        # print(f"Total amount of data received from mongo was {total_size:,} bytes.")
 
         if not rtn:
             raise NoDataFoundException("No Data found for {} in range: {}".format(symbol, date_range))
+
         rtn = self._pad_and_fix_dtypes(rtn, column_dtypes)
 
-        index = pd.to_datetime(np.concatenate(rtn[INDEX]), utc=True, unit='ms')
+        index = np.concatenate(rtn[INDEX])
+        if convert_index:
+            index = index.astype(f"datetime64[{time_unit}]")
+
         if columns is None:
             columns = [x for x in rtn.keys() if x not in (INDEX, 'SYMBOL')]
         if multiple_symbols and 'SYMBOL' not in columns:
@@ -355,19 +358,30 @@ class TickStore(object):
         logger.info("Got data in %s secs, creating DataFrame..." % t)
         mgr = _arrays_to_mgr(arrays, columns, index, columns, dtype=None)
         rtn = pd.DataFrame(mgr)
+        rtn.index.name = "time"
+
         # Present data in the user's default TimeZone
-        rtn.index = rtn.index.tz_convert(mktz())
+        # rtn.index = rtn.index.tz_localize(dt.now().astimezone().tzinfo)
+        # rtn.index = rtn.index.tz_localize('UTC')
 
         t = (dt.now() - perf_start).total_seconds()
         ticks = len(rtn)
         rate = int(ticks / t) if t != 0 else float("nan")
         logger.info("%d rows in %s secs: %s ticks/sec" % (ticks, t, rate))
+
         if not rtn.index.is_monotonic:
             logger.error("TimeSeries data is out of order, sorting!")
             rtn = rtn.sort_index(kind='mergesort')
+
         if date_range:
             # FIXME: support DateRange.interval...
-            rtn = rtn.loc[date_range.start:date_range.end]
+            if convert_index:
+                start_index = rtn.index.searchsorted(date_range.start)
+                end_index = rtn.index.searchsorted(date_range.end)
+            else:
+                start_index = rtn.index.searchsorted(date_range.start.timestamp() * 1e9)
+                end_index = rtn.index.searchsorted(date_range.end.timestamp() * 1e9)
+            rtn = rtn.iloc[start_index:end_index]
         return rtn
 
     def read_metadata(self, symbol):
@@ -405,10 +419,16 @@ class TickStore(object):
                         # This avoids the case with strings where None is cast as 'None'.
                         # Casting the object to a string is not worthwhile anyway as Pandas changes the
                         # dtype back to objectS
-                        if (i == 0 or v[i].dtype != v[i - 1].dtype) and np.can_cast(v[i].dtype, column_dtypes[k],
-                                                                                    casting='safe'):
-                            v[i] = v[i].astype(column_dtypes[k], casting='safe')
-
+                        if (i == 0 or v[i].dtype != v[i - 1].dtype) and \
+                                np.can_cast(v[i].dtype, column_dtypes[k], casting='safe'):
+                            v[i] = arr.astype(column_dtypes[k], casting='safe')
+                        # np.can_cast([x, y, z], dtype) only checks if the array can be cast, not the members of the
+                        # array. This resulted in np.can_cast([False, True], bool) => False. We can check for this by
+                        # checking if every member of arr can be cast to dtype.
+                        # TODO: fix this it's super slow
+                        # elif (i == 0 or v[i].dtype != v[i - 1].dtype) and \
+                        #        all(np.can_cast(x, column_dtypes[k], casting='safe') for x in arr):
+                        #    v[i] = np.array(list(arr), dtype=column_dtypes[k])
             rtn[k] = v
         return rtn
 
@@ -416,7 +436,7 @@ class TickStore(object):
         existing_dtype = column_dtypes.get(c)
         if existing_dtype is None or existing_dtype != dtype:
             # Promote ints to floats - as we can't easily represent NaNs
-            if np.issubdtype(dtype, int):
+            if np.issubdtype(dtype, np.signedinteger):
                 dtype = np.dtype('f8')
             column_dtypes[c] = np.promote_types(column_dtypes.get(c, dtype), dtype)
 
@@ -425,7 +445,7 @@ class TickStore(object):
         first_dt = im[IMAGE_TIME]
         if not first_dt.tzinfo:
             first_dt = first_dt.replace(tzinfo=mktz('UTC'))
-        document[INDEX] = np.insert(document[INDEX], 0, np.uint64(datetime_to_ms(first_dt)))
+        document[INDEX] = np.insert(document[INDEX], 0, np.uint64(datetime_to_ns(first_dt)))
         for field in image:
             if field == INDEX:
                 continue
@@ -542,7 +562,7 @@ class TickStore(object):
         # E = New-B End
         # New-B overlaps with existing buckets 1,2,3
         #
-        # All we need to do is find the bucket who's start is immediately before (E)
+        # All we need to do is find the bucket whose start is immediately before (E)
         # If that document's end is > S, then we know it overlaps
         # with this bucket.
         doc = self._collection.find_one({SYMBOL: symbol,
@@ -553,8 +573,8 @@ class TickStore(object):
                                                     '_id': 0},
                                         sort=[(START, pymongo.DESCENDING)])
         if doc:
-            if not doc[END].tzinfo:
-                doc[END] = doc[END].replace(tzinfo=mktz('UTC'))
+            #if not doc[END].tzinfo:
+            #    doc[END] = doc[END].replace(tzinfo=mktz('UTC'))
             if doc[END] > start:
                 raise OverlappingDataException(
                     "Document already exists with start:{} end:{} in the range of our start:{} end:{}".format(
@@ -582,15 +602,19 @@ class TickStore(object):
         pandas = False
         # Check for overlapping data
         if isinstance(data, list):
-            start = data[0]['index']
+            start = data[0]['index']  # TODO: add timezone support for this case
             end = data[-1]['index']
         elif isinstance(data, pd.DataFrame):
-            start = data.index[0].to_pydatetime()
-            end = data.index[-1].to_pydatetime()
+            if data.index.tz is not None:
+                data.index = data.index.tz_convert('UTC')
+            else:
+                data.index = data.index.tz_localize('UTC')
+            start = pd.Timestamp(data.index[0])
+            end = pd.Timestamp(data.index[-1])
             pandas = True
         else:
             raise UnhandledDtypeException("Can't persist type %s to tickstore" % type(data))
-        self._assert_nonoverlapping_data(symbol, to_dt(start), to_dt(end))
+        self._assert_nonoverlapping_data(symbol, pd.Timestamp(start), pd.Timestamp(end))
 
         if pandas:
             buckets = self._pandas_to_buckets(data, symbol, initial_image)
@@ -602,6 +626,19 @@ class TickStore(object):
             self._metadata.replace_one({SYMBOL: symbol},
                                        {SYMBOL: symbol, META: metadata},
                                        upsert=True)
+
+    def write_metadata(self, symbol, metadata):
+        """
+        Allows writing of metadata outside of a full write operation.
+
+        Parameters
+        ---------
+        symbol: str
+            the symbol name the metadata corresponds to
+        metadata: dict
+            a dictionary of the metadata to be written.
+        """
+        self._metadata.replace_one({SYMBOL: symbol}, {SYMBOL: symbol, META: metadata}, upsert=True)
 
     def _write(self, buckets):
         start = dt.now()
@@ -634,6 +671,22 @@ class TickStore(object):
         return date
 
     @staticmethod
+    def _to_us(date):
+        if isinstance(date, dt):
+            if not date.tzinfo:
+                logger.warning('WARNING: treating naive datetime as UTC in write path')
+            return datetime_to_us(date)
+        return date
+
+    @staticmethod
+    def _to_ns(date):
+        if isinstance(date, dt):
+            if not date.tzinfo:
+                logger.warning('WARNING: treating naive datetime as UTC in write path')
+            return datetime_to_ns(date)
+        return date
+
+    @staticmethod
     def _str_dtype(dtype):
         """
         Represent dtypes without byte order, as earlier Java tickstore code doesn't support explicit byte order.
@@ -647,6 +700,8 @@ class TickStore(object):
             return 'float64'
         elif dtype.kind == 'U':
             return 'U%d' % (dtype.itemsize / 4)
+        elif dtype.kind == 'b':
+            return 'bool'
         else:
             raise UnhandledDtypeException("Bad dtype '%s'" % dtype)
 
@@ -668,6 +723,8 @@ class TickStore(object):
                 array = np.array([s.decode('utf-8') for s in array])
             except:
                 raise UnhandledDtypeException("Only unicode and utf8 strings are supported.")
+        elif array.dtype.kind == 'b':
+            pass
         else:
             raise UnhandledDtypeException("Unsupported dtype '%s' - only int64, float64 and U are supported" % array.dtype)
         # Everything is little endian in tickstore
@@ -688,7 +745,7 @@ class TickStore(object):
     @staticmethod
     def _pandas_to_bucket(df, symbol, initial_image):
         rtn = {SYMBOL: symbol, VERSION: CHUNK_VERSION_NUMBER, COLUMNS: {}, COUNT: len(df)}
-        end = to_dt(df.index[-1].to_pydatetime())
+        end = pd.Timestamp(df.index[-1])
         if initial_image:
             if 'index' in initial_image:
                 start = min(to_dt(df.index[0].to_pydatetime()), initial_image['index'])
@@ -698,12 +755,12 @@ class TickStore(object):
             rtn[IMAGE_DOC] = {IMAGE_TIME: image_start, IMAGE: initial_image}
             final_image = TickStore._pandas_compute_final_image(df, initial_image, end)
         else:
-            start = to_dt(df.index[0].to_pydatetime())
+            start = pd.Timestamp(df.index[0])
             final_image = {}
         rtn[END] = end
         rtn[START] = start
 
-        logger.warning("NB treating all values as 'exists' - no longer sparse")
+        # logger.warning("NB treating all values as 'exists' - no longer sparse")
         rowmask = Binary(lz4_compressHC(np.packbits(np.ones(len(df), dtype='uint8')).tostring()))
 
         index_name = df.index.names[0] or "index"
@@ -722,9 +779,9 @@ class TickStore(object):
             rtn[COLUMNS][col] = col_data
         rtn[INDEX] = Binary(
             lz4_compressHC(np.concatenate(
-                ([recs[index_name][0].astype('datetime64[ms]').view('uint64')],
+                ([recs[index_name][0].astype('datetime64[ns]').view('int64')],
                  np.diff(
-                     recs[index_name].astype('datetime64[ms]').view('uint64')))).tostring()))
+                     recs[index_name].astype('datetime64[ns]').view('int64')))).tostring()))
         return rtn, final_image
 
     @staticmethod
@@ -743,7 +800,7 @@ class TickStore(object):
                     if k != 'index':
                         rowmask[k][i] = 1
                     else:
-                        v = TickStore._to_ms(v)
+                        v = TickStore._to_ns(v)
                         if data[k][-1] > v:
                             raise UnorderedDataException("Timestamps out-of-order: %s > %s" % (
                                 ms_to_datetime(data[k][-1]), t))

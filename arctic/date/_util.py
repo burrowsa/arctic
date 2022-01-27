@@ -127,6 +127,8 @@ def to_pandas_closed_closed(date_range, add_tz=True):
     -------
     Returns a date_range with start-end suitable for slicing in pandas.
     """
+    add_tz = False  # TODO: do we need timezones?
+
     if not date_range:
         return None
 
@@ -155,6 +157,28 @@ def ms_to_datetime(ms, tzinfo=None):
     return datetime.datetime.fromtimestamp(ms * 1e-3, tzinfo)
 
 
+def us_to_datetime(us, tzinfo=None):
+    """Convert a microsecond time value to an offset-aware Python datetime object."""
+    if not isinstance(us, (int, long)):
+        raise TypeError('expected integer, not %s' % type(us))
+
+    if tzinfo is None:
+        tzinfo = mktz()
+
+    return datetime.datetime.fromtimestamp(us * 1e-6, tzinfo)
+
+
+def ns_to_datetime(ns, tzinfo=None):
+    """Convert a nanosecond time value to an offset-aware Python datetime object."""
+    if not isinstance(ns, (int, long)):
+        raise TypeError('expected integer, not %s' % type(ns))
+
+    if tzinfo is None:
+        tzinfo = mktz()
+
+    return datetime.datetime.fromtimestamp(ns * 1e-9, tzinfo)
+
+
 def _add_tzone(dtm):
     if dtm.tzinfo is None:
         dtm = dtm.replace(tzinfo=mktz())
@@ -166,6 +190,22 @@ def datetime_to_ms(d):
     try:
         millisecond = d.microsecond // 1000
         return calendar.timegm(_add_tzone(d).utctimetuple()) * 1000 + millisecond
+    except AttributeError:
+        raise TypeError('expect Python datetime object, not %s' % type(d))
+
+
+def datetime_to_us(d):
+    """Convert a Python datetime object to a microsecond epoch (UTC) time value."""
+    try:
+        return calendar.timegm(_add_tzone(d).utctimetuple()) * 1e6 + d.microsecond
+    except AttributeError:
+        raise TypeError('expect Python datetime object, not %s' % type(d))
+
+
+def datetime_to_ns(d):
+    """Convert a Python datetime object to a microsecond epoch (UTC) time value."""
+    try:
+        return calendar.timegm(_add_tzone(d).utctimetuple()) * 1e9 + d.microsecond * 1e3 + d.nanosecond
     except AttributeError:
         raise TypeError('expect Python datetime object, not %s' % type(d))
 
