@@ -110,7 +110,7 @@ def to_dt(date, default_tz=None):
     return date
 
 
-def to_pandas_closed_closed(date_range, add_tz=True):
+def to_pandas_closed_closed(date_range, add_tz=False):
     """
     Pandas DateRange slicing is CLOSED-CLOSED inclusive at both ends.
 
@@ -127,8 +127,6 @@ def to_pandas_closed_closed(date_range, add_tz=True):
     -------
     Returns a date_range with start-end suitable for slicing in pandas.
     """
-    add_tz = False  # TODO: do we need timezones?
-
     if not date_range:
         return None
 

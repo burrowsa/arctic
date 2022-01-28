@@ -137,8 +137,8 @@ class Arctic(object):
             curr_pid = os.getpid()
             if curr_pid != self._pid:
                 if self._given_instance:
-                    logger.warn("Forking process. Arctic was passed a pymongo connection during init, "
-                                "the new pymongo connection may have different parameters.")
+                    logger.warning("Forking process. Arctic was passed a pymongo connection during init, "
+                                   "the new pymongo connection may have different parameters.")
                 self._pid = curr_pid  # this line has to precede reset() otherwise we get to eternal recursion
                 self.reset()  # also triggers re-auth
 
