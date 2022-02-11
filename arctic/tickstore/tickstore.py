@@ -11,7 +11,6 @@ from bson.binary import Binary
 from pymongo import ReadPreference
 from pymongo.errors import OperationFailure
 from six import iteritems, string_types
-import sys
 
 try:
     from pandas.core.frame import _arrays_to_mgr
